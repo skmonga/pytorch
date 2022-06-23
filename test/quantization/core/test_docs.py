@@ -95,7 +95,10 @@ class TestQuantizationDocs(QuantizationTestCase):
                 )
             )
             return code
+<<<<<<< HEAD
 
+=======
+>>>>>>> 6ef92627c98 ([ao][docs] tests for quantization docs)
         return None
 
     def _test_code(self, code, global_inputs=None):
