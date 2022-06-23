@@ -1,4 +1,5 @@
 #pragma once
+#include <ATen/SparseTensorUtils.h>
 #include <ATen/TensorIndexing.h>
 #include <ATen/TensorIterator.h>
 #include <ATen/core/ATen_fwd.h>
@@ -109,6 +110,62 @@ Tensor spdiags_impl(
     }
   }
   return result_coo;
+}
+
+template <typename kernel_func_t>
+Tensor spdiags_backward_impl(
+    const Tensor& grad_out,
+    const Tensor& offsets,
+    IntArrayRef input_shape,
+    const kernel_func_t& kernel_func) {
+  auto offsets_1d = offsets.dim() == 0 ? offsets.unsqueeze(0) : offsets;
+
+  auto n_diag = input_shape.size() == 2 ? input_shape[0] : 1;
+  auto n_col_in = input_shape.size() == 2 ? input_shape[1] : input_shape[0];
+  AT_ASSERT(grad_out.dim() == 2);
+  AT_ASSERT(offsets_1d.size(0) == n_diag);
+  auto grad_in_options = grad_out.options().layout(Layout::Strided);
+  Tensor grad_in = at::zeros({n_diag, n_col_in}, grad_in_options);
+  auto grad_out_coo =
+      grad_out.layout() == Layout::Sparse ? grad_out : grad_out.to_sparse();
+
+  auto nnz = sparse::get_sparse_impl(grad_out_coo)->nnz();
+
+  // Restride tensors for TensorIterator
+  // here we restride n-diag dims to nnz
+  // We are going to iterate through values/indices, compute the diagonal the
+  // element is on, the col index already gives us a col position, and we search
+  // the offsets to find the row position.
+
+  // Grad_out and offsets need to be restrided
+  auto grad_in_restrided = grad_in.as_strided({nnz}, {0});
+  auto offsets_restrided = offsets_1d.as_strided({nnz}, {0});
+  // We will need these to compute assignment positions into grad_in
+  auto grad_in_strides = grad_in.strides();
+  // We will need these to ensure the computed position in bounds
+  auto grad_in_shape = grad_in.sizes();
+  // These do not need to be restrided if we take a view on row/col indiecs
+  // separately
+  auto grad_out_values = sparse::get_sparse_impl(grad_out_coo)->values_;
+  auto grad_out_indices = sparse::get_sparse_impl(grad_out_coo)->indices_;
+  auto grad_out_row_indices = grad_out_indices[0];
+  auto grad_out_col_indices = grad_out_indices[1];
+
+  auto iter = TensorIteratorConfig()
+                  .set_check_mem_overlap(false)
+                  .check_all_same_dtype(false)
+                  .resize_outputs(false)
+                  .add_output(grad_in_restrided)
+                  .add_input(offsets_restrided)
+                  .add_input(grad_out_values)
+                  .add_input(grad_out_row_indices)
+                  .add_input(grad_out_col_indices)
+                  .build();
+
+  kernel_func(
+      iter, n_diag, offsets_1d.stride(0), grad_in_strides, grad_in_shape);
+
+  return grad_in.reshape(input_shape);
 }
 } // namespace impl
 } // namespace native
